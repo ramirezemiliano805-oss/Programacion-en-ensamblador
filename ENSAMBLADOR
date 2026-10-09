@@ -1,0 +1,118 @@
+; ======================================================================================
+; DIRECTIVAS DE KEIL Y MAPEO DE MEMORIA 
+; ======================================================================================
+                AREA    codigo, CODE, READONLY, ALIGN=2
+
+                THUMB
+                EXPORT  __main
+                EXPORT  EXTI0_IRQHandler        ; EXPORTAR OBLIGATORIO para el archivo startup.s
+
+; --- Direcciones base ---
+RCC_BASE        EQU     0x40021000      
+GPIOA_BASE      EQU     0x40010800      
+GPIOC_BASE      EQU     0x40011000      
+AFIO_BASE       EQU     0x40010000      ; Base para Alternate Function (Interrupciones)
+EXTI_BASE       EQU     0x40010400      ; Base para External Interrupts
+NVIC_ISER0      EQU     0xE000E100      ; Registro para habilitar interrupciones en el procesador
+
+; --- Offsets RCC y GPIO ---
+RCC_APB2ENR     EQU     0x18            
+GPIO_CRL        EQU     0x00            
+GPIO_CRH        EQU     0x04            
+GPIO_ODR        EQU     0x0C            
+GPIO_BSRR       EQU     0x10            
+
+; --- Offsets EXTI ---
+EXTI_IMR        EQU     0x00            ; Interrupt Mask Register
+EXTI_FTSR       EQU     0x0C            ; Flanco de bajada
+EXTI_PR         EQU     0x14            ; Bandera de interrupción
+
+
+; ======================================================================================
+; PROGRAMA PRINCIPAL
+; ======================================================================================
+__main          PROC
+                
+                ; 1. HABILITAR RELOJES (AFIO, PORTA, PORTC)
+                LDR     R0, =RCC_BASE
+                LDR     R1, [R0, #RCC_APB2ENR]  
+                ; Bit 0=AFIOEN, Bit 2=IOPAEN, Bit 4=IOPCEN.  (0x15 = 0001 0101 en binario)
+                ORR     R1, R1, #0x15           
+                STR     R1, [R0, #RCC_APB2ENR]  
+
+                ; 2. CONFIGURAR PC13 COMO SALIDA (LED)
+                LDR     R0, =GPIOC_BASE
+                LDR     R1, [R0, #GPIO_CRH]     
+                LDR     R2, =0xFF0FFFFF         
+                AND     R1, R1, R2              
+                ORR     R1, R1, #0x00200000     
+                STR     R1, [R0, #GPIO_CRH]     
+
+                ; 3. CONFIGURAR PA0 COMO ENTRADA CON PULL-UP
+                LDR     R0, =GPIOA_BASE
+                LDR     R1, [R0, #GPIO_CRL]     
+                BIC     R1, R1, #0x0000000F     
+                ORR     R1, R1, #0x00000008     
+                STR     R1, [R0, #GPIO_CRL]     
+                
+                MOV     R1, #0x01               
+                STR     R1, [R0, #GPIO_BSRR]    ; Activa Pull-up en PA0
+
+                ; 4. CONFIGURAR LA LÍNEA EXTI0 (Conectada a PA0 por defecto)
+                LDR     R0, =EXTI_BASE
+                
+                ; a) Habilitar interrupción en la línea 0
+                LDR     R1, [R0, #EXTI_IMR]
+                ORR     R1, R1, #0x01
+                STR     R1, [R0, #EXTI_IMR]
+                
+                ; b) Configurar sensibilidad al Flanco de Bajada (Falling Edge)
+                ; Al tener un Pull-up, al presionar el botón el voltaje cae de 3.3V a 0V
+                LDR     R1, [R0, #EXTI_FTSR]
+                ORR     R1, R1, #0x01
+                STR     R1, [R0, #EXTI_FTSR]
+
+                ; 5. HABILITAR LA INTERRUPCIÓN EXTI0 EN EL NVIC DEL PROCESADOR
+                ; La interrupción EXTI0 es la número 6 en la tabla de vectores (IRQ6).
+                LDR     R0, =NVIC_ISER0
+                MOV     R1, #0x40               ; 1 desplazado 6 posiciones a la izquierda (1 << 6)
+                STR     R1, [R0, #0]
+
+; ======================================================================================
+; BUCLE INFINITO (El procesador puede descansar aquí)
+; ======================================================================================
+loop
+                WFI                             ; Wait For Interrupt: Duerme el CPU ahorrando energía
+                B       loop                    ; Si despierta y regresa de la interrupción, vuelve a dormir
+
+                ALIGN
+                ENDP
+
+
+; ======================================================================================
+; RUTINA DE SERVICIO DE INTERRUPCIÓN (ISR) PARA EXTI0
+; Esta rutina se ejecuta automáticamente al presionar el botón
+; ======================================================================================
+EXTI0_IRQHandler PROC
+                
+                ; 1. LIMPIAR LA BANDERA DE INTERRUPCIÓN (Obligatorio)
+                ; Se debe escribir un '1' en el bit correspondiente de EXTI_PR para limpiarla.
+                LDR     R0, =EXTI_BASE
+                MOV     R1, #0x01
+                STR     R1, [R0, #EXTI_PR]
+
+                ; 2. ALTERNAR (TOGGLE) EL ESTADO DEL LED EN PC13
+                ; Utilizamos EOR (Exclusive OR / XOR) con la máscara 0x2000. 
+                ; Si el bit 13 era 1, pasa a 0; si era 0, pasa a 1.
+                LDR     R0, =GPIOC_BASE
+                LDR     R1, [R0, #GPIO_ODR]
+                EOR     R1, R1, #0x2000         ; Invierte el estado exclusivo del bit 13
+                STR     R1, [R0, #GPIO_ODR]
+
+                ; 3. REGRESAR AL PROGRAMA PRINCIPAL
+                BX      LR                      ; Branch and eXchange (Retorno de interrupción)
+                
+                ALIGN
+                ENDP
+
+                END
